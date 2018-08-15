@@ -729,7 +729,8 @@ class ImageDataGenerator(object):
                  rescale=None,
                  preprocessing_function=None,
                  data_format=None,
-                 validation_split=0.0):
+                 validation_split=0.0,
+                 pool=None):
         if data_format is None:
             data_format = backend.image_data_format()
         self.featurewise_center = featurewise_center
@@ -751,6 +752,7 @@ class ImageDataGenerator(object):
         self.vertical_flip = vertical_flip
         self.rescale = rescale
         self.preprocessing_function = preprocessing_function
+        self.pool = pool
 
         if data_format not in {'channels_last', 'channels_first'}:
             raise ValueError(
@@ -965,7 +967,10 @@ class ImageDataGenerator(object):
             save_format=save_format,
             follow_links=follow_links,
             subset=subset,
-            interpolation=interpolation)
+            interpolation=interpolation,
+            pool=self.pool)
+
+
 
     def standardize(self, x):
         """Applies the normalization configuration to a batch of inputs.
@@ -1664,7 +1669,8 @@ class DirectoryIterator(Iterator):
                  save_to_dir=None, save_prefix='', save_format='png',
                  follow_links=False,
                  subset=None,
-                 interpolation='nearest'):
+                 interpolation='nearest',
+                 pool=None):
         if data_format is None:
             data_format = backend.image_data_format()
         self.directory = directory
@@ -1702,6 +1708,7 @@ class DirectoryIterator(Iterator):
         self.save_prefix = save_prefix
         self.save_format = save_format
         self.interpolation = interpolation
+        self.pool = pool
 
         if subset is not None:
             validation_split = self.image_data_generator._validation_split
@@ -1766,26 +1773,38 @@ class DirectoryIterator(Iterator):
                                                 shuffle,
                                                 seed)
 
+
+    def _get_and_transform_image(self,fname):
+        img = load_img(os.path.join(self.directory, fname),
+                       color_mode=self.color_mode,
+                       target_size=self.target_size,
+                       interpolation=self.interpolation)
+        x = img_to_array(img, data_format=self.data_format)
+        # Pillow images should be closed after `load_img`,
+        # but not PIL images.
+        if hasattr(img, 'close'):
+            img.close()
+        params = self.image_data_generator.get_random_transform(x.shape)
+        x = self.image_data_generator.apply_transform(x, params)
+        x = self.image_data_generator.standardize(x)
+        return x
+
+
     def _get_batches_of_transformed_samples(self, index_array):
-        batch_x = np.zeros(
-            (len(index_array),) + self.image_shape,
-            dtype=backend.floatx())
         # build batch of image data
-        for i, j in enumerate(index_array):
-            fname = self.filenames[j]
-            img = load_img(os.path.join(self.directory, fname),
-                           color_mode=self.color_mode,
-                           target_size=self.target_size,
-                           interpolation=self.interpolation)
-            x = img_to_array(img, data_format=self.data_format)
-            # Pillow images should be closed after `load_img`,
-            # but not PIL images.
-            if hasattr(img, 'close'):
-                img.close()
-            params = self.image_data_generator.get_random_transform(x.shape)
-            x = self.image_data_generator.apply_transform(x, params)
-            x = self.image_data_generator.standardize(x)
-            batch_x[i] = x
+        if self.pool:
+            result = self.pool.map(self._get_and_transform_image, 
+                            ((self.filenames[j]) 
+                                for i, j in enumerate(index_array)))
+            batch_x = np.array(result)
+        else:
+            batch_x = np.zeros(
+                (len(index_array),) + self.image_shape,
+                dtype=backend.floatx())        
+            for i, j in enumerate(index_array):
+                fname = self.filenames[j]
+                x = self._get_and_transform_image(self.filenames[j])
+                batch_x[i] = x
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
             for i, j in enumerate(index_array):
@@ -1824,3 +1843,4 @@ class DirectoryIterator(Iterator):
         # The transformation of images is not under thread lock
         # so it can be done in parallel
         return self._get_batches_of_transformed_samples(index_array)
+
