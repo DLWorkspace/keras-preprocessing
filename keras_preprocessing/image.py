@@ -15,8 +15,10 @@ from functools import partial
 
 from . import get_keras_submodule
 
+
 backend = get_keras_submodule('backend')
 keras_utils = get_keras_submodule('utils')
+
 
 try:
     from PIL import ImageEnhance
@@ -971,6 +973,62 @@ class ImageDataGenerator(object):
             pool=self.pool)
 
 
+    def flow_from_metaFunc(self, metaFunc,
+                            target_size=(256, 256), color_mode='rgb',
+                            classes=None, class_mode='categorical',
+                            batch_size=32, shuffle=True, seed=None,
+                            save_to_dir=None,
+                            save_prefix='',
+                            save_format='png',
+                            follow_links=False,
+                            subset=None,
+                            interpolation='nearest',
+                            image_in_memory = False):
+        return MetadataIterator(
+            metaFunc, self,
+            target_size=target_size, color_mode=color_mode,
+            classes=classes, class_mode=class_mode,
+            data_format=self.data_format,
+            batch_size=batch_size, shuffle=shuffle, seed=seed,
+            save_to_dir=save_to_dir,
+            save_prefix=save_prefix,
+            save_format=save_format,
+            follow_links=follow_links,
+            subset=subset,
+            interpolation=interpolation,
+            image_in_memory = image_in_memory,
+            pool=self.pool)
+    
+    def flow_from_metaseq( self, metaSeq, 
+                            target_size=(256, 256), color_mode='rgb',
+                            classes=None, class_mode='categorical',
+                            batch_size=32, shuffle=True, seed=None,
+                            save_to_dir=None,
+                            save_prefix='',
+                            save_format='png',
+                            follow_links=False,
+                            subset=None,
+                            interpolation='nearest',
+                            raise_exception = False,
+                            image_in_memory = False):
+        """ Returning a sequence for training/evaluation
+        """
+        return MetadataSeqIterator(
+            metaSeq, self,
+            target_size=target_size, color_mode=color_mode,
+            classes=classes, class_mode=class_mode,
+            data_format=self.data_format,
+            batch_size=batch_size, shuffle=shuffle, seed=seed,
+            save_to_dir=save_to_dir,
+            save_prefix=save_prefix,
+            save_format=save_format,
+            follow_links=follow_links,
+            subset=subset,
+            interpolation=interpolation,
+            raise_exception = raise_exception,
+            image_in_memory = image_in_memory,
+            pool=self.pool)
+    
 
     def standardize(self, x):
         """Applies the normalization configuration to a batch of inputs.
@@ -1351,7 +1409,6 @@ class Iterator(keras_utils.Sequence):
             A batch of transformed samples.
         """
         raise NotImplementedError
-
 
 class NumpyArrayIterator(Iterator):
     """Iterator yielding data from a Numpy array.
@@ -1843,4 +1900,721 @@ class DirectoryIterator(Iterator):
         # The transformation of images is not under thread lock
         # so it can be done in parallel
         return self._get_batches_of_transformed_samples(index_array)
+
+
+
+
+
+class DirectoryIterator_with_hard_samples(Iterator):
+    """Iterator capable of reading images from a directory on disk.
+    # Arguments
+        directory: Path to the directory to read images from.
+            Each subdirectory in this directory will be
+            considered to contain images from one class,
+            or alternatively you could specify class subdirectories
+            via the `classes` argument.
+        image_data_generator: Instance of `ImageDataGenerator`
+            to use for random transformations and normalization.
+        target_size: tuple of integers, dimensions to resize input images to.
+        color_mode: One of `"rgb"`, `"rgba"`, `"grayscale"`.
+            Color mode to read images.
+        classes: Optional list of strings, names of subdirectories
+            containing images from each class (e.g. `["dogs", "cats"]`).
+            It will be computed automatically if not set.
+        class_mode: Mode for yielding the targets:
+            `"binary"`: binary targets (if there are only two classes),
+            `"categorical"`: categorical targets,
+            `"sparse"`: integer targets,
+            `"input"`: targets are images identical to input images (mainly
+                used to work with autoencoders),
+            `None`: no targets get yielded (only input images are yielded).
+        batch_size: Integer, size of a batch.
+        shuffle: Boolean, whether to shuffle the data between epochs.
+        seed: Random seed for data shuffling.
+        data_format: String, one of `channels_first`, `channels_last`.
+        save_to_dir: Optional directory where to save the pictures
+            being yielded, in a viewable format. This is useful
+            for visualizing the random transformations being
+            applied, for debugging purposes.
+        save_prefix: String prefix to use for saving sample
+            images (if `save_to_dir` is set).
+        save_format: Format to use for saving sample images
+            (if `save_to_dir` is set).
+        subset: Subset of data (`"training"` or `"validation"`) if
+            validation_split is set in ImageDataGenerator.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", and "bicubic".
+            If PIL version 1.1.3 or newer is installed, "lanczos" is also
+            supported. If PIL version 3.4.0 or newer is installed, "box" and
+            "hamming" are also supported. By default, "nearest" is used.
+    """
+
+    def __init__(self, directory, image_data_generator,
+                 target_size=(256, 256), color_mode='rgb',
+                 classes=None, class_mode='categorical',
+                 batch_size=32, shuffle=True, seed=None,
+                 data_format=None,
+                 save_to_dir=None, save_prefix='', save_format='png',
+                 follow_links=False,
+                 subset=None,
+                 interpolation='nearest',
+                 pool=None,
+                 hard_samples=None, hard_sample_rate=0):
+        self.hard_samples = hard_samples
+        self.hard_sample_rate = hard_sample_rate
+
+        if data_format is None:
+            data_format = backend.image_data_format()
+        self.directory = directory
+        self.image_data_generator = image_data_generator
+        self.target_size = tuple(target_size)
+        if color_mode not in {'rgb', 'rgba', 'grayscale'}:
+            raise ValueError('Invalid color mode:', color_mode,
+                             '; expected "rgb", "rgba", or "grayscale".')
+        self.color_mode = color_mode
+        self.data_format = data_format
+        if self.color_mode == 'rgba':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (4,)
+            else:
+                self.image_shape = (4,) + self.target_size
+        elif self.color_mode == 'rgb':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (3,)
+            else:
+                self.image_shape = (3,) + self.target_size
+        else:
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (1,)
+            else:
+                self.image_shape = (1,) + self.target_size
+        self.classes = classes
+        if class_mode not in {'categorical', 'binary', 'sparse',
+                              'input', None}:
+            raise ValueError('Invalid class_mode:', class_mode,
+                             '; expected one of "categorical", '
+                             '"binary", "sparse", "input"'
+                             ' or None.')
+        self.class_mode = class_mode
+        self.save_to_dir = save_to_dir
+        self.save_prefix = save_prefix
+        self.save_format = save_format
+        self.interpolation = interpolation
+        self.pool = pool
+
+        if subset is not None:
+            validation_split = self.image_data_generator._validation_split
+            if subset == 'validation':
+                split = (0, validation_split)
+            elif subset == 'training':
+                split = (validation_split, 1)
+            else:
+                raise ValueError(
+                    'Invalid subset name: %s;'
+                    'expected "training" or "validation"' % (subset,))
+        else:
+            split = None
+        self.subset = subset
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp',
+                              'ppm', 'tif', 'tiff'}
+        # First, count the number of samples and classes.
+        self.samples = 0
+
+        if not classes:
+            classes = []
+            for subdir in sorted(os.listdir(directory)):
+                if os.path.isdir(os.path.join(directory, subdir)):
+                    classes.append(subdir)
+        self.num_classes = len(classes)
+        self.class_indices = dict(zip(classes, range(len(classes))))
+
+        pool = multiprocessing.pool.ThreadPool()
+        function_partial = partial(_count_valid_files_in_directory,
+                                   white_list_formats=white_list_formats,
+                                   follow_links=follow_links,
+                                   split=split)
+        self.samples = sum(pool.map(function_partial,
+                                    (os.path.join(directory, subdir)
+                                     for subdir in classes)))
+
+        print('Found %d images belonging to %d classes.' %
+              (self.samples, self.num_classes))
+
+        # Second, build an index of the images
+        # in the different class subfolders.
+        results = []
+        self.filenames = []
+        self.classes = np.zeros((self.samples,), dtype='int32')
+        i = 0
+        for dirpath in (os.path.join(directory, subdir) for subdir in classes):
+            results.append(
+                pool.apply_async(_list_valid_filenames_in_directory,
+                                 (dirpath, white_list_formats, split,
+                                  self.class_indices, follow_links)))
+        for res in results:
+            classes, filenames = res.get()
+            self.classes[i:i + len(classes)] = classes
+            self.filenames += filenames
+            i += len(classes)
+
+        pool.close()
+        pool.join()
+        super(DirectoryIterator_with_hard_samples, self).__init__(self.samples,
+                                                batch_size,
+                                                shuffle,
+                                                seed)
+
+
+    def _get_and_transform_image(self,fname):
+        img = load_img(os.path.join(self.directory, fname),
+                       color_mode=self.color_mode,
+                       target_size=self.target_size,
+                       interpolation=self.interpolation)
+        x = img_to_array(img, data_format=self.data_format)
+        # Pillow images should be closed after `load_img`,
+        # but not PIL images.
+        if hasattr(img, 'close'):
+            img.close()
+        params = self.image_data_generator.get_random_transform(x.shape)
+        x = self.image_data_generator.apply_transform(x, params)
+        x = self.image_data_generator.standardize(x)
+        return x
+
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        # build batch of image data
+        if self.pool:
+            result = self.pool.map(self._get_and_transform_image, 
+                            ((self.filenames[j]) 
+                                for i, j in enumerate(index_array)))
+            batch_x = np.array(result)
+        else:
+            batch_x = np.zeros(
+                (len(index_array),) + self.image_shape,
+                dtype=backend.floatx())        
+            for i, j in enumerate(index_array):
+                fname = self.filenames[j]
+                x = self._get_and_transform_image(self.filenames[j])
+                batch_x[i] = x
+        # optionally save augmented images to disk for debugging purposes
+        if self.save_to_dir:
+            for i, j in enumerate(index_array):
+                img = array_to_img(batch_x[i], self.data_format, scale=True)
+                fname = '{prefix}_{index}_{hash}.{format}'.format(
+                    prefix=self.save_prefix,
+                    index=j,
+                    hash=np.random.randint(1e7),
+                    format=self.save_format)
+                img.save(os.path.join(self.save_to_dir, fname))
+        # build batch of labels
+        if self.class_mode == 'input':
+            batch_y = batch_x.copy()
+        elif self.class_mode == 'sparse':
+            batch_y = self.classes[index_array]
+        elif self.class_mode == 'binary':
+            batch_y = self.classes[index_array].astype(backend.floatx())
+        elif self.class_mode == 'categorical':
+            batch_y = np.zeros(
+                (len(batch_x), self.num_classes),
+                dtype=backend.floatx())
+            for i, label in enumerate(self.classes[index_array]):
+                batch_y[i, label] = 1.
+        else:
+            return batch_x
+
+        self.current_data = batch_x
+        self.current_label = batch_y            
+        return batch_x, batch_y
+
+    def next(self):
+        """For python 2.x.
+        # Returns
+            The next batch.
+        """
+        with self.lock:
+            index_array = next(self.index_generator)
+
+        hard_samples_index = None
+        if self.hard_samples is not None and self.hard_sample_rate > 0:
+            try:
+                hard_samples = np.array(self.hard_samples["hard_samples_index"])
+                hard_sample_num = min(len(hard_samples), int(current_batch_size * self.hard_sample_rate))
+                if hard_sample_num > 0 :
+                    selected_hard_samples = hard_samples[np.random.permutation(len(hard_samples))[:hard_sample_num]]
+                    for i in range(hard_sample_num):
+                        if selected_hard_samples[i] not in index_array:
+                            index_array[i] = selected_hard_samples[i]
+            except Exception as e:
+                print(str(e))
+                pass             
+
+        self.current_batch_filenames = [self.filenames[j] for j in index_array]
+        self.current_index_array = index_array      
+
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
+
+
+    def get_current_batch_meta(self):
+        return self.current_index_array,self.current_data,self.current_label
+
+
+
+
+
+class MetadataIterator(Iterator):
+    """Iterator capable of reading images from a directory on disk.
+
+    # Arguments
+        directory: Path to the directory to read images from.
+            Each subdirectory in this directory will be
+            considered to contain images from one class,
+            or alternatively you could specify class subdirectories
+            via the `classes` argument.
+        image_data_generator: Instance of `ImageDataGenerator`
+            to use for random transformations and normalization.
+        target_size: tuple of integers, dimensions to resize input images to.
+        color_mode: One of `"rgb"`, `"rgba"`, `"grayscale"`.
+            Color mode to read images.
+        classes: Optional list of strings, names of subdirectories
+            containing images from each class (e.g. `["dogs", "cats"]`).
+            It will be computed automatically if not set.
+        class_mode: Mode for yielding the targets:
+            `"binary"`: binary targets (if there are only two classes),
+            `"categorical"`: categorical targets,
+            `"sparse"`: integer targets,
+            `"input"`: targets are images identical to input images (mainly
+                used to work with autoencoders),
+            `None`: no targets get yielded (only input images are yielded).
+        batch_size: Integer, size of a batch.
+        shuffle: Boolean, whether to shuffle the data between epochs.
+        seed: Random seed for data shuffling.
+        data_format: String, one of `channels_first`, `channels_last`.
+        save_to_dir: Optional directory where to save the pictures
+            being yielded, in a viewable format. This is useful
+            for visualizing the random transformations being
+            applied, for debugging purposes.
+        save_prefix: String prefix to use for saving sample
+            images (if `save_to_dir` is set).
+        save_format: Format to use for saving sample images
+            (if `save_to_dir` is set).
+        subset: Subset of data (`"training"` or `"validation"`) if
+            validation_split is set in ImageDataGenerator.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", and "bicubic".
+            If PIL version 1.1.3 or newer is installed, "lanczos" is also
+            supported. If PIL version 3.4.0 or newer is installed, "box" and
+            "hamming" are also supported. By default, "nearest" is used.
+    """
+
+    def __init__(self, metadataFunc, image_data_generator,
+                 target_size=(256, 256), color_mode='rgb',
+                 classes=None, class_mode='categorical',
+                 batch_size=32, shuffle=True, seed=None,
+                 data_format=None,
+                 save_to_dir=None, save_prefix='', save_format='png',
+                 follow_links=False,
+                 subset=None,
+                 interpolation='nearest',
+                 pool=None):
+        if data_format is None:
+            data_format = backend.image_data_format()
+        self.metadataFunc = metadataFunc
+        self.image_data_generator = image_data_generator
+        self.target_size = tuple(target_size)
+        if color_mode not in {'rgb', 'rgba', 'grayscale'}:
+            raise ValueError('Invalid color mode:', color_mode,
+                             '; expected "rgb", "rgba", or "grayscale".')
+        self.color_mode = color_mode
+        self.data_format = data_format
+        if self.color_mode == 'rgba':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (4,)
+            else:
+                self.image_shape = (4,) + self.target_size
+        elif self.color_mode == 'rgb':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (3,)
+            else:
+                self.image_shape = (3,) + self.target_size
+        else:
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (1,)
+            else:
+                self.image_shape = (1,) + self.target_size
+        self.classes = classes
+        if class_mode not in {'categorical', 'binary', 'sparse',
+                              'input', None}:
+            raise ValueError('Invalid class_mode:', class_mode,
+                             '; expected one of "categorical", '
+                             '"binary", "sparse", "input"'
+                             ' or None.')
+        self.class_mode = class_mode
+        self.save_to_dir = save_to_dir
+        self.save_prefix = save_prefix
+        self.save_format = save_format
+        self.interpolation = interpolation
+        self.pool = pool
+
+        if subset is not None:
+            validation_split = self.image_data_generator._validation_split
+            if subset == 'validation':
+                split = (0, validation_split)
+            elif subset == 'training':
+                split = (validation_split, 1)
+            else:
+                raise ValueError(
+                    'Invalid subset name: %s;'
+                    'expected "training" or "validation"' % (subset,))
+        else:
+            split = None
+        self.subset = subset
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp',
+                              'ppm', 'tif', 'tiff'}
+        # First, count the number of samples and classes.
+        self.samples = 0
+
+
+        filenames, labels, classnames = metadataFunc()
+
+        if classes is None:
+            classes = classnames
+
+        self.filenames = filenames
+        self.num_classes = len(classes)
+        self.class_indices = dict(zip(classes, range(len(classes))))
+        self.samples = len(filenames)
+
+        print('Found %d images belonging to %d classes.' %
+              (self.samples, self.num_classes))
+
+
+        self.classes = labels
+        super(MetadataIterator, self).__init__(self.samples,
+                                                batch_size,
+                                                shuffle,
+                                                seed)
+
+
+    def _get_and_transform_image(self,fname):
+        img = load_img(os.path.join(self.directory, fname),
+                       color_mode=self.color_mode,
+                       target_size=self.target_size,
+                       interpolation=self.interpolation)
+        x = img_to_array(img, data_format=self.data_format)
+        # Pillow images should be closed after `load_img`,
+        # but not PIL images.
+        if hasattr(img, 'close'):
+            img.close()
+        params = self.image_data_generator.get_random_transform(x.shape)
+        x = self.image_data_generator.apply_transform(x, params)
+        x = self.image_data_generator.standardize(x)
+        return x
+
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        # build batch of image data
+        if self.pool:
+            result = self.pool.map(self._get_and_transform_image, 
+                            ((self.filenames[j]) 
+                                for i, j in enumerate(index_array)))
+            batch_x = np.array(result)
+        else:
+            batch_x = np.zeros(
+                (len(index_array),) + self.image_shape,
+                dtype=backend.floatx())        
+            for i, j in enumerate(index_array):
+                fname = self.filenames[j]
+                x = self._get_and_transform_image(self.filenames[j])
+                batch_x[i] = x
+        # optionally save augmented images to disk for debugging purposes
+        if self.save_to_dir:
+            for i, j in enumerate(index_array):
+                img = array_to_img(batch_x[i], self.data_format, scale=True)
+                fname = '{prefix}_{index}_{hash}.{format}'.format(
+                    prefix=self.save_prefix,
+                    index=j,
+                    hash=np.random.randint(1e7),
+                    format=self.save_format)
+                img.save(os.path.join(self.save_to_dir, fname))
+        # build batch of labels
+        if self.class_mode == 'input':
+            batch_y = batch_x.copy()
+        elif self.class_mode == 'sparse':
+            batch_y = self.classes[index_array]
+        elif self.class_mode == 'binary':
+            batch_y = self.classes[index_array].astype(backend.floatx())
+        elif self.class_mode == 'categorical':
+            batch_y = np.zeros(
+                (len(batch_x), self.num_classes),
+                dtype=backend.floatx())
+            for i, label in enumerate(self.classes[index_array]):
+                batch_y[i, label] = 1.
+        else:
+            return batch_x
+        return batch_x, batch_y
+
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        with self.lock:
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
+
+
+
+
+
+
+
+
+
+
+
+class MetadataSeqIterator(Iterator):
+    """Iterator capable of reading images from a directory on disk.
+
+    # Arguments
+        directory: Path to the directory to read images from.
+            Each subdirectory in this directory will be
+            considered to contain images from one class,
+            or alternatively you could specify class subdirectories
+            via the `classes` argument.
+        image_data_generator: Instance of `ImageDataGenerator`
+            to use for random transformations and normalization.
+        target_size: tuple of integers, dimensions to resize input images to.
+        color_mode: One of `"rgb"`, `"rgba"`, `"grayscale"`.
+            Color mode to read images.
+        classes: Optional list of strings, names of subdirectories
+            containing images from each class (e.g. `["dogs", "cats"]`).
+            It will be computed automatically if not set.
+        class_mode: Mode for yielding the targets:
+            `"binary"`: binary targets (if there are only two classes),
+            `"categorical"`: categorical targets,
+            `"sparse"`: integer targets,
+            `"input"`: targets are images identical to input images (mainly
+                used to work with autoencoders),
+            `None`: no targets get yielded (only input images are yielded).
+        batch_size: Integer, size of a batch.
+        shuffle: Boolean, whether to shuffle the data between epochs.
+        seed: Random seed for data shuffling.
+        data_format: String, one of `channels_first`, `channels_last`.
+        save_to_dir: Optional directory where to save the pictures
+            being yielded, in a viewable format. This is useful
+            for visualizing the random transformations being
+            applied, for debugging purposes.
+        save_prefix: String prefix to use for saving sample
+            images (if `save_to_dir` is set).
+        save_format: Format to use for saving sample images
+            (if `save_to_dir` is set).
+        subset: Subset of data (`"training"` or `"validation"`) if
+            validation_split is set in ImageDataGenerator.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", and "bicubic".
+            If PIL version 1.1.3 or newer is installed, "lanczos" is also
+            supported. If PIL version 3.4.0 or newer is installed, "box" and
+            "hamming" are also supported. By default, "nearest" is used.
+    """
+
+    def __init__(self, metadataSeqFunc, image_data_generator,
+                 target_size=(256, 256), color_mode='rgb',
+                 classes=None, class_mode='categorical',
+                 batch_size=32, shuffle=True, seed=None,
+                 data_format=None,
+                 save_to_dir=None, save_prefix='', save_format='png',
+                 follow_links=False,
+                 subset=None,
+                 interpolation='nearest',
+                 raise_exception = False, 
+                 image_in_memory = False,                 
+                 pool=None):
+        if data_format is None:
+            data_format = backend.image_data_format()
+        self.metadataSeq = metadataSeqFunc()
+        self.image_data_generator = image_data_generator
+        self.target_size = tuple(target_size)
+        if color_mode not in {'rgb', 'rgba', 'grayscale'}:
+            raise ValueError('Invalid color mode:', color_mode,
+                             '; expected "rgb", "rgba", or "grayscale".')
+        self.color_mode = color_mode
+        self.data_format = data_format
+        if self.color_mode == 'rgba':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (4,)
+            else:
+                self.image_shape = (4,) + self.target_size
+        elif self.color_mode == 'rgb':
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (3,)
+            else:
+                self.image_shape = (3,) + self.target_size
+        else:
+            if self.data_format == 'channels_last':
+                self.image_shape = self.target_size + (1,)
+            else:
+                self.image_shape = (1,) + self.target_size
+        self.classes = classes
+        if class_mode not in {'categorical', 'binary', 'sparse',
+                              'input', None}:
+            raise ValueError('Invalid class_mode:', class_mode,
+                             '; expected one of "categorical", '
+                             '"binary", "sparse", "input"'
+                             ' or None.')
+        self.class_mode = class_mode
+        self.save_to_dir = save_to_dir
+        self.save_prefix = save_prefix
+        self.save_format = save_format
+        self.interpolation = interpolation
+        self.pool = pool
+
+        if subset is not None:
+            validation_split = self.image_data_generator._validation_split
+            if subset == 'validation':
+                split = (0, validation_split)
+            elif subset == 'training':
+                split = (validation_split, 1)
+            else:
+                raise ValueError(
+                    'Invalid subset name: %s;'
+                    'expected "training" or "validation"' % (subset,))
+        else:
+            split = None
+        self.subset = subset
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp',
+                              'ppm', 'tif', 'tiff'}
+        # First, count the number of samples and classes.
+        self.samples = 0
+
+
+
+        nb_sample = 0
+        cnames = None
+        labels = None
+        for ( filenames, uselabels, classnames ) in metadataSeqFunc():
+            nb_sample += len( filenames ) 
+            cnames = classnames
+            labels = uselabels
+
+
+        if classes is None:
+            classes = cnames
+
+        self.filenames = filenames
+        self.num_classes = len(classes)
+        self.class_indices = dict(zip(classes, range(len(classes))))
+        self.samples = nb_sample
+
+        print('Found %d images belonging to %d classes.' %
+              (self.samples, self.num_classes))
+
+        if self.class_mode == 'sparse' or self.class_mode == 'binary' or self.class_mode == 'categorical':
+            self.classes = np.asarray(labels, dtype='int32')
+        else:
+            self.classes = labels
+
+        self.directory = "/"
+        self.firstPrint = True # Disable printing for debugging. 
+        self.raise_exception = raise_exception
+        
+        self.image_in_memory = image_in_memory
+        self.image_cache = {}
+
+
+        super(MetadataSeqIterator, self).__init__(self.samples,
+                                                batch_size,
+                                                shuffle,
+                                                seed)
+
+
+    def _get_and_transform_image(self,fname):
+        img = load_img(os.path.join(self.directory, fname),
+                       color_mode=self.color_mode,
+                       target_size=self.target_size,
+                       interpolation=self.interpolation)
+        x = img_to_array(img, data_format=self.data_format)
+        # Pillow images should be closed after `load_img`,
+        # but not PIL images.
+        if hasattr(img, 'close'):
+            img.close()
+        params = self.image_data_generator.get_random_transform(x.shape)
+        x = self.image_data_generator.apply_transform(x, params)
+        x = self.image_data_generator.standardize(x)
+        return x
+
+
+    def _get_batches_of_transformed_samples(self, index_array):
+
+        with self.lock:
+            try:
+                filenames, labels, classnames = next(self.metadataSeq)
+            except StopIteration:
+                if self.raise_exception:
+                    raise
+                filenames, labels, classnames = next(self.metadataSeq)  
+
+        self.filenames=filenames
+        self.classes=labels
+        index_array=range(len( filenames ) )
+        # build batch of image data
+        if self.pool:
+            result = self.pool.map(self._get_and_transform_image, 
+                            ((self.filenames[j]) 
+                                for i, j in enumerate(index_array)))
+            batch_x = np.array(result)
+        else:
+            batch_x = np.zeros(
+                (len(index_array),) + self.image_shape,
+                dtype=backend.floatx())        
+            for i, j in enumerate(index_array):
+                fname = self.filenames[j]
+                x = self._get_and_transform_image(self.filenames[j])
+                batch_x[i] = x
+        # optionally save augmented images to disk for debugging purposes
+        if self.save_to_dir:
+            for i, j in enumerate(index_array):
+                img = array_to_img(batch_x[i], self.data_format, scale=True)
+                fname = '{prefix}_{index}_{hash}.{format}'.format(
+                    prefix=self.save_prefix,
+                    index=j,
+                    hash=np.random.randint(1e7),
+                    format=self.save_format)
+                img.save(os.path.join(self.save_to_dir, fname))
+        # build batch of labels
+        if self.class_mode == 'input':
+            batch_y = batch_x.copy()
+        elif self.class_mode == 'sparse':
+            batch_y = self.classes[index_array]
+        elif self.class_mode == 'binary':
+            batch_y = self.classes[index_array].astype(backend.floatx())
+        elif self.class_mode == 'categorical':
+            batch_y = np.zeros(
+                (len(batch_x), self.num_classes),
+                dtype=backend.floatx())
+            for i, label in enumerate(self.classes[index_array]):
+                batch_y[i, label] = 1.
+        else:
+            return batch_x
+        return batch_x, batch_y
+
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples()
 
