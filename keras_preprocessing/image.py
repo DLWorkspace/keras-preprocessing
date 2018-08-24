@@ -2565,7 +2565,7 @@ class MetadataSeqIterator(Iterator):
                 filenames, labels, classnames = next(self.metadataSeq)  
 
         self.filenames=filenames
-        self.classes=labels
+        self.classes=np.array(labels)
         index_array=range(len( filenames ) )
         # build batch of image data
         if self.pool:
