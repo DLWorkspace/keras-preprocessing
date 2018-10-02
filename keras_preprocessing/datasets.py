@@ -255,7 +255,7 @@ class MetadataSeqSiamese():
 ############################################################
     
 class DatasetSubdirectory():
-    def __init__(self, root_dir, metadata_file, data_dir, equiv_file = None, verbose = True, seed = 0, splits = {"train": 80, "val": 20 } ):
+    def __init__(self, root_dir, metadata_file, data_dir, equiv_file = None, verbose = True, seed = 0, splits = {"train": 80, "val": 20 }, subfolder=True ):
         super().__init__() 
         self.metadata = { }
         self.metadata_nontrain = { }
@@ -271,6 +271,7 @@ class DatasetSubdirectory():
         self.list = {}
         self.seed = seed
         self.metadata_file = os.path.join( self.root_dir, metadata_file)
+        self.subfolder = subfolder
         if not os.path.isfile( self.metadata_file):
             self.prepare_metadata()
         self.equiv_file = equiv_file
@@ -400,11 +401,15 @@ class DatasetSubdirectory():
                 fname = tup[0]
                 cl = tup[1]
                 classname = self.classnames[cl]
+                if self.subfolder:
+                    filepath = os.path.join(classname, fname)
+                else:
+                    filepath = fname
                 if classname in self.metadata[key]:
-                    self.list[key].append( ( os.path.join(classname, fname),cl))
+                    self.list[key].append( ( filepath,cl))
                 else:
                     # Move train to val
-                    self.list["val"].append( ( os.path.join(classname, fname),cl))
+                    self.list["val"].append( ( filepath,cl))
             start = end
             
             
