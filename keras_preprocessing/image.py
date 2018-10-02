@@ -2614,7 +2614,9 @@ class MetadataSeqIterator(Iterator):
         # Returns
             The next batch.
         """
+        with self.lock:
+            index_array = next(self.index_generator)        
         # The transformation of images is not under thread lock
         # so it can be done in parallel
-        return self._get_batches_of_transformed_samples()
+        return self._get_batches_of_transformed_samples(index_array)
 
